@@ -1,6 +1,6 @@
 version "4.14.2"
-// Version: 1.0beta29
-// Date: 2025-09-05 01:20:57 EDT
+// Version: 1.0beta30
+// Date: 2025-09-05 14:14:00 EDT
 // Patch Notes:
 // - **Beta 29 – Code cleanup & deprecation removal**
 //   • Removed the nonfunctional Nightmare Protocol boon and all related code (enum, names,
@@ -1310,7 +1310,7 @@ class RogueBoons
             case DRB_SoulSiphon:          return "Heals per kill (10 s).";
             case DRB_UACXPSurge:          return "+50% XP (10 s).";
             case DRB_BerserkRite:         return "Adds a Steadfast DR stack.";
-            case DRB_QuadDamage:          return "Quad damage (4 s).";
+            case DRB_QuadDamage:          return "Quad damage (15 s).";
 
             // Beta 18/22 special boons
             case DRB_Executioner:         return "Deals extra damage to low‑health enemies.";
@@ -2243,12 +2243,48 @@ class DR_SoulSphereProxy : SoulSphere
 {
     override bool TryPickup(in out Actor toucher)
     {
-        PlayerPawn pp=PlayerPawn(toucher);
-        bool ok=Super.TryPickup(toucher);
-        if(!ok||!pp) return ok;
-        RogueStats st=RogueCoreHandler.GetOrGiveStats(pp);
-        if(!st) return ok;
-        if (st.SuperchargeStacks>0) RogueBoons.HealCapped(pp, st.SuperchargeStacks*25, true);
+        // Modified Soulsphere pickup: always grant +100 HP (plus Supercharge stacks) relative to current health
+        // and allow overheal beyond the vanilla 200 HP cap when Raise Max Health boons are active.  To
+        // preserve the pickup sound and message we call the base TryPickup first, then adjust the player's
+        // health based on their state prior to the pickup.  See discussion in Issue #29.
+        PlayerPawn pp = PlayerPawn(toucher);
+        if (!pp) return false;
+        // Record the player's health before the base Supercharge effect applies so we can compute the
+        // total amount of healing to apply.  Do this up front because Super.TryPickup() will reset
+        // health to 200.
+        int oldHealth = pp.health;
+        bool ok = Super.TryPickup(toucher);
+        if (!ok) return ok;
+        // Acquire stats after base pickup so that stats exist on new players.
+        RogueStats st = RogueCoreHandler.GetOrGiveStats(pp);
+        // Determine additional heal from Supercharge stacks.  Each stack adds 25 HP on top of the base +100.
+        int extra = 0;
+        if (st != null && st.SuperchargeStacks > 0) extra = st.SuperchargeStacks * 25;
+        // Desired new health: current health prior to pickup +100 HP + any stack bonus.
+        int newWanted = oldHealth + 100 + extra;
+        // Compute the dynamic health cap (base 200 plus Raise Max Health tiers).  Mirror HealCapped().
+        int cap = DR_MAX_HEALTH_CAP;
+        if (st != null)
+        {
+            cap = DR_MAX_HEALTH_CAP
+                + st.MaxHealthBonus * DR_RAISE_HEALTH_INC
+                + st.MinorHealthBonus * DR_RAISE_HEALTH_MINI_INC;
+            if (cap > DR_RAISE_HEALTH_CAP) cap = DR_RAISE_HEALTH_CAP;
+        }
+        if (newWanted > cap) newWanted = cap;
+        // Base TryPickup() leaves the player at 200 HP; adjust up or down to reach the desired target.
+        if (newWanted > 200)
+        {
+            // Heal the difference beyond the base 200 HP.  Allow overheal by passing allow200=true.
+            int addAmt = newWanted - 200;
+            RogueBoons.HealCapped(pp, addAmt, true);
+        }
+        else if (newWanted < 200)
+        {
+            // Clamp down if the desired health is below the base supercharge value (e.g. when the
+            // player was under 100 HP before pickup).  Directly set health rather than healing.
+            pp.health = newWanted;
+        }
         return ok;
     }
 }
@@ -2300,6 +2336,68 @@ class DR_BlueArmorProxy : BlueArmor {
         double mul = RogueUtil.Powd(1.15, st.Boon_ArmorReinfI) * RogueUtil.Powd(1.25, st.Boon_ArmorReinfII);
         if (mul > 1.0001) ba.Amount = int(double(ba.Amount) * mul + 0.5);
         if (ba.Amount > DR_MAX_ARMOR_CAP) ba.Amount = DR_MAX_ARMOR_CAP;
+        return ok;
+    }
+}
+
+// Proxy for the Megasphere (full megasphere powerup).  The vanilla Megasphere
+// sets the player's health and armour to 200 regardless of their existing
+// reserves.  In Doom Rogue we instead want to grant a **+200 HP** and
+// **+200 armour** bonus relative to the player's current values and allow
+// exceeding the vanilla 200 limit when Raise Max Health or Raise Max Armor
+// boons are active.  This proxy preserves the default pickup sound and
+// message by calling Super.TryPickup() first, then applies the scaled
+// healing and armour increments based on the player's state prior to the
+// pickup.
+class DR_MegasphereProxy : Megasphere
+{
+    override bool TryPickup(in out Actor toucher)
+    {
+        PlayerPawn pp = PlayerPawn(toucher);
+        if (!pp) return false;
+        // Record pre-pickup health and armour to compute deltas after the base effect.
+        int oldHealth = pp.health;
+        int oldArmor  = 0;
+        let baPrev = BasicArmor(pp.FindInventory('BasicArmor'));
+        if (baPrev != null) oldArmor = baPrev.Amount;
+        bool ok = Super.TryPickup(toucher);
+        if (!ok) return ok;
+        RogueStats st = RogueCoreHandler.GetOrGiveStats(pp);
+        // Adjust health: base Megasphere sets HP to 200.  We want oldHealth + 200, clamped to the dynamic cap.
+        int desiredHP = oldHealth + 200;
+        // Compute dynamic health cap (base 200 plus Raise Max Health tiers).  Mirror HealCapped().
+        int capHP = DR_MAX_HEALTH_CAP;
+        if (st != null)
+        {
+            capHP = DR_MAX_HEALTH_CAP
+                + st.MaxHealthBonus * DR_RAISE_HEALTH_INC
+                + st.MinorHealthBonus * DR_RAISE_HEALTH_MINI_INC;
+            if (capHP > DR_RAISE_HEALTH_CAP) capHP = DR_RAISE_HEALTH_CAP;
+        }
+        if (desiredHP > capHP) desiredHP = capHP;
+        if (desiredHP > 200)
+        {
+            // Heal the amount beyond the base 200 HP; allow overheal.
+            int addHP = desiredHP - 200;
+            RogueBoons.HealCapped(pp, addHP, true);
+        }
+        else if (desiredHP < 200)
+        {
+            // If desired HP is less than 200, lower the health accordingly.
+            pp.health = desiredHP;
+        }
+        // Adjust armour: base Megasphere sets armour to 200.  We want oldArmor + 200, clamped to the dynamic cap.
+        let ba = BasicArmor(pp.FindInventory('BasicArmor'));
+        if (ba != null)
+        {
+            int desiredArm = oldArmor + 200;
+            // Compute dynamic armour cap: base 200 plus Raise Max Armor tiers.  Mirror ArmorGrantScaled().
+            int capArm = DR_MAX_ARMOR_CAP + ((st != null) ? st.MaxArmorBonus * DR_RAISE_ARMOR_INC : 0);
+            if (capArm > DR_RAISE_ARMOR_CAP) capArm = DR_RAISE_ARMOR_CAP;
+            if (desiredArm > capArm) desiredArm = capArm;
+            ba.MaxAmount = capArm;
+            ba.Amount = desiredArm;
+        }
         return ok;
     }
 }
@@ -2650,7 +2748,7 @@ class RogueCoreHandler : EventHandler
     static bool IsOurPickupProxy(Actor a)
     {
         return a is 'DR_ArmorBonusProxy' || a is 'DR_StimpackProxy' || a is 'DR_MedikitProxy' || a is 'DR_HealthBonusProxy' ||
-               a is 'DR_SoulSphereProxy' || a is 'DR_GreenArmorProxy' || a is 'DR_BlueArmorProxy';
+               a is 'DR_SoulSphereProxy' || a is 'DR_MegasphereProxy' || a is 'DR_GreenArmorProxy' || a is 'DR_BlueArmorProxy';
     }
     static bool DebugOn() {
         CVar c = CVar.GetCVar("dr_dbg");
@@ -3010,6 +3108,7 @@ static RogueStats GetOrGiveStats(PlayerPawn pp)
         if (cls == 'Medikit')      replacement = 'DR_MedikitProxy';
         if (cls == 'HealthBonus')  replacement = 'DR_HealthBonusProxy';
         if (cls == 'SoulSphere')   replacement = 'DR_SoulSphereProxy';
+        if (cls == 'Megasphere')   replacement = 'DR_MegasphereProxy';
         if (cls == 'GreenArmor')   replacement = 'DR_GreenArmorProxy';
         if (cls == 'BlueArmor')    replacement = 'DR_BlueArmorProxy';
         if (cls == 'Berserk')      replacement = 'DR_BerserkProxy';
@@ -3544,7 +3643,9 @@ int xppct = int(gxp * txp * 100.0 + 0.5) - 100;
                 if (st && st.SoulSiphonTics > 0 && st.SoulSiphonLevel > 0)
                 {
                     int ssSec = int(ceil(double(st.SoulSiphonTics) / TICRATE));
-                    String ssMsg = String.Format("Soul Siphon: +%d HP/kill  %ds", st.SoulSiphonLevel, ssSec);
+                    // Remove the trailing 's' from the seconds display per playtester feedback
+                    // Format Soul Siphon timer with a hyphen instead of a colon per playtester feedback.  Remove the trailing 's' on seconds.
+                    String ssMsg = String.Format("Soul Siphon - +%d HP/kill  %d", st.SoulSiphonLevel, ssSec);
                     Screen.DrawText(buffF, Font.CR_GREEN, startX, startY + lineH2 * idx, ssMsg);
                     idx++;
                 }
@@ -3553,7 +3654,9 @@ int xppct = int(gxp * txp * 100.0 + 0.5) - 100;
                 {
                     int xpSec = int(ceil(double(st.TimedXPTics) / TICRATE));
                     int xpPct = int((st.TimedXPMult - 1.0) * 100.0 + 0.5);
-                    String xpMsg = String.Format("XP Surge: +%d%% XP  %ds", xpPct, xpSec);
+                    // Remove the trailing 's' from the seconds display per playtester feedback
+                    // Format XP Surge timer with a hyphen instead of a colon.  Seconds appear without the trailing 's'.
+                    String xpMsg = String.Format("XP Surge - +%d%% XP  %d", xpPct, xpSec);
                     Screen.DrawText(buffF, Font.CR_LIGHTBLUE, startX, startY + lineH2 * idx, xpMsg);
                     idx++;
                 }
@@ -3562,7 +3665,9 @@ int xppct = int(gxp * txp * 100.0 + 0.5) - 100;
                 {
                     int frSec = int(ceil(double(st.FrenzyBuffTics) / TICRATE));
                     int frPct = int(DR_FRENZY_PER_STACK * double(st.FrenzyStacks) * 100.0 + 0.5);
-                    String frMsg = String.Format("Frenzy: +%d%% dmg (%d)  %ds", frPct, st.FrenzyStacks, frSec);
+                    // Remove the trailing 's' from the seconds display per playtester feedback
+                    // Format Frenzy timer with a hyphen and include stacks and seconds sans the trailing 's'.
+                    String frMsg = String.Format("Frenzy - +%d%% dmg (%d)  %d", frPct, st.FrenzyStacks, frSec);
                     Screen.DrawText(buffF, Font.CR_RED, startX, startY + lineH2 * idx, frMsg);
                     idx++;
                 }
@@ -3570,7 +3675,9 @@ int xppct = int(gxp * txp * 100.0 + 0.5) - 100;
                 if (st && st.QuadTics > 0)
                 {
                     int qSec = int(ceil(double(st.QuadTics) / TICRATE));
-                    String qMsg = String.Format("Quad Damage: %ds", qSec);
+                    // Remove the trailing 's' from the seconds display per playtester feedback
+                    // Format Quad Damage timer with a hyphen; show seconds without the trailing 's'.
+                    String qMsg = String.Format("Quad Damage - %d", qSec);
                     Screen.DrawText(buffF, Font.CR_ORANGE, startX, startY + lineH2 * idx, qMsg);
                     idx++;
                 }
@@ -3579,7 +3686,9 @@ int xppct = int(gxp * txp * 100.0 + 0.5) - 100;
                 {
                     int brSec = int(ceil(double(st.BloodRiteTics) / TICRATE));
                     int lifepct = int(DR_BR_LIFESTEAL * 100.0 + 0.5);
-                    String brMsg = String.Format("Berserk Rite: %d%% lifesteal  %ds", lifepct, brSec);
+                    // Remove the trailing 's' from the seconds display per playtester feedback
+                    // Format Berserk Rite timer with a hyphen and include lifesteal percentage and seconds sans 's'.
+                    String brMsg = String.Format("Berserk Rite - %d%% lifesteal  %d", lifepct, brSec);
                     Screen.DrawText(buffF, Font.CR_PURPLE, startX, startY + lineH2 * idx, brMsg);
                     idx++;
                 }
@@ -3587,7 +3696,9 @@ int xppct = int(gxp * txp * 100.0 + 0.5) - 100;
                 if (st && st.AdrenalShieldTics > 0)
                 {
                     int asSec = int(ceil(double(st.AdrenalShieldTics) / TICRATE));
-                    String asMsg = String.Format("Adrenal Surge: Shield  %ds", asSec);
+                    // Remove the trailing 's' from the seconds display per playtester feedback
+                    // Format Adrenal Surge timer with a hyphen and show remaining seconds without 's'.
+                    String asMsg = String.Format("Adrenal Surge - Shield  %d", asSec);
                     Screen.DrawText(buffF, Font.CR_GREEN, startX, startY + lineH2 * idx, asMsg);
                     idx++;
                 }
