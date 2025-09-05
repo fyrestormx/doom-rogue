@@ -1,6 +1,18 @@
 version "4.14.2"
-// Version: 1.0beta30
-// Date: 2025-09-05 14:14:00 EDT
+// Version: 1.0beta31
+// Date: 2025-09-05 16:00:00 EDT
+// Patch Notes:
+// - **Beta 31 – Final tuning & debug instrumentation**
+//   • Added gating logic to the boon selection routine to prevent selecting Bulwark Shards once the
+//     shard tier is maxed (4/4), Deimos Bulwark once Bulwark stacks are full (3/3), and Berserking
+//     Firepower once acquired.  This ensures future level‑up boons always provide a benefit instead of
+//     silently doing nothing.
+//   • Added detailed health and armour debug messages for SoulSphere and Megasphere pickups.  When
+//     debug logging is enabled (dr_dbg>=2), picking up these powerups prints the player's HP and
+//     armour before and after the pickup along with the dynamic cap.  This aids balancing and
+//     verifies that overheal and armour scaling respect the Raise Max boons.
+//   • Updated the Berserking Firepower description to read “15% damage to all weapons.” for clarity.
+//   • Incremented version number to 1.0beta31 and date.
 // Patch Notes:
 // - **Beta 29 – Code cleanup & deprecation removal**
 //   • Removed the nonfunctional Nightmare Protocol boon and all related code (enum, names,
@@ -1322,7 +1334,7 @@ class RogueBoons
             case DRB_RaiseMaxArmor:       return "+25 max armor.";
             case DRB_RaiseMaxHealthMinor: return "+5 max HP.";
             case DRB_MaxHealthDamage:     return "Damage bonus at max HP.";
-            case DRB_BerserkingFirepower: return "+15% global damage.";
+            case DRB_BerserkingFirepower: return "15% damage to all weapons.";
             case DRB_TimeRewind:          return "Allows rewinding time once per run.";
             default:                      return "Power up";
         }
@@ -1466,27 +1478,63 @@ class RogueBoons
                 // Weighted selection for offensive boons.  Damage Booster and Overcharger remain common,
                 // Executioner and Heavy Slayer are mid‑tier, Quad Damage and Berserking Firepower are
                 // rare.  Probabilities: 30% Damage Booster, 20% UAC Overcharger, 15% Executioner,
-                // 15% Heavy Slayer, 10% Berserking Firepower, 10% Quad Damage.
-                int pick = Random(1,100);
-                if (pick <= 30) return DRB_DamageBooster;
-                else if (pick <= 50) return DRB_UACOvercharger;
-                else if (pick <= 65) return DRB_Executioner;
-                else if (pick <= 80) return DRB_HeavySlayer;
-                else if (pick <= 90) return DRB_BerserkingFirepower;
-                else return DRB_QuadDamage;
+                // 15% Heavy Slayer, 10% Berserking Firepower, 10% Quad Damage.  If a candidate boon
+                // cannot be awarded due to an existing permanent buff (e.g. already having Berserking
+                // Firepower), re‑roll up to a handful of times until a valid boon is chosen.  This
+                // prevents handing out redundant boons while preserving approximate weighting.
+                for (int attempt = 0; attempt < 5; attempt++)
+                {
+                    int pick = Random(1,100);
+                    DRBoonId candidate;
+                    if (pick <= 30)       candidate = DRB_DamageBooster;
+                    else if (pick <= 50)  candidate = DRB_UACOvercharger;
+                    else if (pick <= 65)  candidate = DRB_Executioner;
+                    else if (pick <= 80)  candidate = DRB_HeavySlayer;
+                    else if (pick <= 90)  candidate = DRB_BerserkingFirepower;
+                    else                  candidate = DRB_QuadDamage;
+                    // Gating: skip Berserking Firepower if already owned
+                    if (candidate == DRB_BerserkingFirepower && st && st.BerserkFirepower)
+                    {
+                        // Try again
+                        continue;
+                    }
+                    return candidate;
+                }
+                // Fallback: if no valid pick after several attempts, default to Damage Booster.
+                return DRB_DamageBooster;
             }
 
             case DR_CAT_DEFENSE:
             {
                 // Defensive boons: Marine Grit, Bulwark Shards, Adrenal Surge, Deimos Bulwark,
                 // and Armor Bonus Mastery.  Probabilities: 40% Marine Grit, 20% Bulwark Shards,
-                // 15% Adrenal Surge, 15% Deimos Bulwark, 10% Armor Bonus Mastery.
-                int pick = Random(1,100);
-                if (pick <= 40) return DRB_MarineGrit;
-                else if (pick <= 60) return DRB_BulwarkShards;
-                else if (pick <= 75) return DRB_AdrenalSurge;
-                else if (pick <= 90) return DRB_DeimosBulwark;
-                else return DRB_ArmorBonusMastery;
+                // 15% Adrenal Surge, 15% Deimos Bulwark, 10% Armor Bonus Mastery.  If a candidate
+                // boon would have no effect because the player has reached the maximum tier or stack,
+                // re‑roll up to a handful of times until a valid boon is selected.  This avoids
+                // awarding additional Bulwark shards or stacks once the cap is reached.
+                for (int attempt = 0; attempt < 5; attempt++)
+                {
+                    int pick = Random(1,100);
+                    DRBoonId candidate;
+                    if (pick <= 40)        candidate = DRB_MarineGrit;
+                    else if (pick <= 60)   candidate = DRB_BulwarkShards;
+                    else if (pick <= 75)   candidate = DRB_AdrenalSurge;
+                    else if (pick <= 90)   candidate = DRB_DeimosBulwark;
+                    else                   candidate = DRB_ArmorBonusMastery;
+                    // Gating: skip Bulwark Shards if at max tier (4)
+                    if (candidate == DRB_BulwarkShards && st && st.BulwarkShardLevel >= 4)
+                    {
+                        continue;
+                    }
+                    // Gating: skip Deimos Bulwark if Bulwark stacks at max (3)
+                    if (candidate == DRB_DeimosBulwark && st && st.Boon_BulwarkStacks >= 3)
+                    {
+                        continue;
+                    }
+                    return candidate;
+                }
+                // Fallback: if all gated, default to Marine Grit.
+                return DRB_MarineGrit;
             }
 
             default: // DR_CAT_UTILITY
@@ -2272,6 +2320,12 @@ class DR_SoulSphereProxy : SoulSphere
             if (cap > DR_RAISE_HEALTH_CAP) cap = DR_RAISE_HEALTH_CAP;
         }
         if (newWanted > cap) newWanted = cap;
+        // Debug: log the health change for playtesting.  Only emit when debug is enabled.
+        if (RogueCoreHandler.DebugOn() && RogueCoreHandler.DebugLevel() >= 2)
+        {
+            // Use A_Log so the message appears in the HUD and is captured in the console log.  Format: before -> after (cap).
+            pp.A_Log(String.Format("[DR PICKUP] SoulSphere: HP %d -> %d (cap %d)", oldHealth, newWanted, cap));
+        }
         // Base TryPickup() leaves the player at 200 HP; adjust up or down to reach the desired target.
         if (newWanted > 200)
         {
@@ -2363,9 +2417,9 @@ class DR_MegasphereProxy : Megasphere
         bool ok = Super.TryPickup(toucher);
         if (!ok) return ok;
         RogueStats st = RogueCoreHandler.GetOrGiveStats(pp);
-        // Adjust health: base Megasphere sets HP to 200.  We want oldHealth + 200, clamped to the dynamic cap.
+        // Adjust health and armour relative to current values rather than resetting to 200.
+        // Compute desired health as oldHealth + 200, then clamp to the dynamic cap.
         int desiredHP = oldHealth + 200;
-        // Compute dynamic health cap (base 200 plus Raise Max Health tiers).  Mirror HealCapped().
         int capHP = DR_MAX_HEALTH_CAP;
         if (st != null)
         {
@@ -2375,26 +2429,34 @@ class DR_MegasphereProxy : Megasphere
             if (capHP > DR_RAISE_HEALTH_CAP) capHP = DR_RAISE_HEALTH_CAP;
         }
         if (desiredHP > capHP) desiredHP = capHP;
+        // Compute desired armour as oldArmor + 200, then clamp to the dynamic cap.  Use zero if no BasicArmor exists.
+        int desiredArm = oldArmor + 200;
+        int capArm = DR_MAX_ARMOR_CAP;
+        if (st != null)
+        {
+            capArm += st.MaxArmorBonus * DR_RAISE_ARMOR_INC;
+        }
+        if (capArm > DR_RAISE_ARMOR_CAP) capArm = DR_RAISE_ARMOR_CAP;
+        if (desiredArm > capArm) desiredArm = capArm;
+        // Debug: log the health/armour changes for playtesting.  Only emit when debug is enabled.
+        if (RogueCoreHandler.DebugOn() && RogueCoreHandler.DebugLevel() >= 2)
+        {
+            pp.A_Log(String.Format("[DR PICKUP] Megasphere: HP %d -> %d (cap %d), Armor %d -> %d (cap %d)", oldHealth, desiredHP, capHP, oldArmor, desiredArm, capArm));
+        }
+        // Apply the health adjustment.  Base TryPickup() sets HP to 200; heal or reduce accordingly.
         if (desiredHP > 200)
         {
-            // Heal the amount beyond the base 200 HP; allow overheal.
             int addHP = desiredHP - 200;
             RogueBoons.HealCapped(pp, addHP, true);
         }
         else if (desiredHP < 200)
         {
-            // If desired HP is less than 200, lower the health accordingly.
             pp.health = desiredHP;
         }
-        // Adjust armour: base Megasphere sets armour to 200.  We want oldArmor + 200, clamped to the dynamic cap.
+        // Apply the armour adjustment.  Base TryPickup() sets armour to 200; adjust relative to old value if BasicArmor exists.
         let ba = BasicArmor(pp.FindInventory('BasicArmor'));
         if (ba != null)
         {
-            int desiredArm = oldArmor + 200;
-            // Compute dynamic armour cap: base 200 plus Raise Max Armor tiers.  Mirror ArmorGrantScaled().
-            int capArm = DR_MAX_ARMOR_CAP + ((st != null) ? st.MaxArmorBonus * DR_RAISE_ARMOR_INC : 0);
-            if (capArm > DR_RAISE_ARMOR_CAP) capArm = DR_RAISE_ARMOR_CAP;
-            if (desiredArm > capArm) desiredArm = capArm;
             ba.MaxAmount = capArm;
             ba.Amount = desiredArm;
         }
