@@ -1,0 +1,4 @@
+gameinfo
+{
+  AddEventHandlers = "RogueCoreHandler","RogueHUD","DR_TestHarness"
+}

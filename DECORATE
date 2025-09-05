@@ -1,0 +1,2134 @@
+// ============================================================================
+// Doom Rogue (Oldschool Gameplay Roguelike) — test channel v0.1.0
+// Target: GZDoom 4.14.x
+//
+// Introduction
+// - DECORATE-only monster randomizer for classic Doom.
+// - Vanilla behaviors and frames kept; tiers add modest, readable difficulty (base + T2–T5).
+// - Palette-safe tints and small cadence tweaks keep the game fresh without gimmicks.
+//
+// This file (scope)
+// - TRNSLATE tints: T2=TEAL, T3=TOXIC GREEN, T4=ROYAL VIOLET, T5=DEEP CRIMSON.
+// - Stable class IDs (*_T2..*_T5) and RandomSpawners. Do NOT rename classes.
+// - Preserve stock BRIGHT usage and 4-char sprite names. No A_Jump/A_RandomJump.
+// - MAP07: Mancubus/Arachnotron use +MAP07BOSS1/2 and -BOSSDEATH.
+//
+// As an AI, this is what I learned about scripting for gzDoom.
+// • DECORATE limitations
+//   - No MeleeObituary on monsters → use HitObituary to get correct melee kill text (Imp/HK/Baron/Demon/Spectre).
+//   - Per-attack obits require DamageType + LANGUAGE (future option).
+//   - Menus/HUD/XP systems belong in ZScript (not in this file).
+//
+// • Cadence & correctness (stock fidelity matters)
+//   - Mancubus: G A_FatRaise → H BRIGHT A_FatAttack1/2/3 with IG face ticks between volleys.
+//   - Lost Soul: C A_FaceTarget → D BRIGHT A_SkullAttack → loop CD; damage comes from actor Damage.
+//     Tier “bite boost” works cleanly via short PowerDamage buffs with A_Jump chances.
+//   - Demon/Spectre: single swipe (E A_FaceTarget → F A_CustomMeleeAttack → See) with tiered damage ceilings.
+//   - Imp: explicit Melee state + HitObituary; ranged stays A_TroopAttack volley pattern.
+//   - Hell Knight / Baron: strict throw cadence; HitObituary ensures tiered melee obits.
+//   - Revenant: keep A_SkelMissile + muzzle frames; vanilla homing; melee uses generic Obituary.
+//   - Cacodemon: A_HeadAttack cadence preserved; volleys extended by tier only.
+//   - Arachnotron / Spiderdemon: use A_SpidRefire (never A_BspiRefire).
+//   - Spider Mastermind: SPID A wind-up, then GH pairs; refire between GH; tiers add GH pairs.
+//   - Cyberdemon: vanilla look; faster cadence by trimming only E (telegraph) between rockets.
+//
+// • Balance & visuals
+//   - Conservative tier scaling (HP/Speed/PainChance). Validate with arena TTK tests later.
+//   - Tint stack reads clearly on brown/gray sprites: TEAL → TOXIC GREEN → VIOLET → CRIMSON.
+//   - RandomSpawner weights bias to base/T2; higher tiers remain rare.
+//
+// Implemented in v0.1.0 (summary)
+// - ZM/SG/CG: vanilla cadence; tiered volley counts and drops (stock assets).
+// - IMP/HK/BAR: melee obits fixed via HitObituary; strict stock missile throw frames.
+// - DEM/SPC: reverted to single-swipe melee; randomized bite up to tier caps.
+// - LSO: vanilla charge + tiered bite boosts (temporary PowerDamage).
+// - MAN: corrected G/H/IG firing sequence; extra volleys by tier; MAP07 flags.
+// - CAC/ARA/SMM/CYB/REV: stock cadence preserved with tiered extensions where safe.
+//
+// Roadmap (requires ZScript; not part of this DECORATE file)
+// 1) Start Menu (MENUDEF): select Mode (Rogue Monsters | Rogue Monsters+Weapons) + Skill.
+// 2) Monsters+Weapons Mode: RoguePlayer + EventHandler; XP/levels from kills/pickups; upgrades to vanilla weapons
+//    (e.g., SSG level: pellet dmg/spread cadence), small armor DR stacks; no new art.
+// 3) Minimal HUD: Level/XP and additive stats with brief pickup toasts (vanilla font).
+// 4) LANGUAGE-based obits via DamageType if we want per-attack messages later.
+// ============================================================================
+
+
+// -------------------------------- BASE CLONES --------------------------------
+
+actor ZM_Base  : ZombieMan       { Tag "Zombieman" }
+actor SG_Base  : ShotgunGuy      { Tag "Shotgun Guy" }
+actor IMP_Base : DoomImp         { Tag "Imp" }
+actor DEM_Base : Demon           { Tag "Demon" }
+actor SPC_Base : Spectre         { Tag "Spectre" }
+actor CG_Base  : ChaingunGuy     { Tag "Chaingunner" }
+actor CAC_Base : Cacodemon       { Tag "Cacodemon" }
+actor LSO_Base : LostSoul        { Tag "Lost Soul" }
+actor HK_Base  : HellKnight      { Tag "Hell Knight" }
+actor BAR_Base : BaronOfHell     { Tag "Baron of Hell" }
+actor REV_Base : Revenant        { Tag "Revenant" }
+actor PEL_Base : PainElemental   { Tag "Pain Elemental" }
+actor ARC_Base : Archvile        { Tag "Archvile" }
+actor SMM_Base : SpiderMastermind{ Tag "Spider Mastermind" }
+actor CYB_Base : Cyberdemon      { Tag "Cyberdemon" }
+
+actor MAN_Base : Fatso
+{
+  Tag "Mancubus"
+  -BOSSDEATH
+  +MAP07BOSS1
+  States
+  {
+  Death:
+    FATT K 6
+    FATT L 6 A_Scream
+    FATT M 6 A_NoBlocking
+    FATT NOPQRS 6
+    FATT T -1
+    Stop
+  }
+}
+
+actor ARA_Base : Arachnotron
+{
+  Tag "Arachnotron"
+  -BOSSDEATH
+  +MAP07BOSS2
+  States
+  {
+  Death:
+    BSPI J 20 A_Scream
+    BSPI K 7  A_NoBlocking
+    BSPI LMNO 7
+    BSPI P -1
+    Stop
+  }
+}
+
+
+// ------------------------------ IMP PROJECTILES ------------------------------
+// Flavor-only examples (not used by our Imp tiers which stick to A_TroopAttack)
+
+actor RL_ImpBall_T2 : DoomImpBall { Obituary "%o was blistered by a Barraging Imp (II)." }
+actor RL_ImpBall_T3 : DoomImpBall { Obituary "%o was charred by a Howling Imp (III)." }
+actor RL_ImpBall_T4 : DoomImpBall { Obituary "%o was burned to ash by an Incinerating Imp (IV)." }
+actor RL_ImpBall_T5 : DoomImpBall { Obituary "%o was consumed in hellfire by a Hellstorming Imp (V)." }
+
+
+// =============================== ZOMBIEMAN (v1.1.1) ===============================
+// Vanilla pistol cadence. Volleys by tier = 2/3/4/5.
+
+actor ZM_T2 : ZombieMan
+{
+  Tag "Flanking Zombieman (II)"
+  Translation "TINT_TIER2"
+  Health 24
+  PainChance 190
+  Speed 9
+  DropItem "Clip", 255, 10
+  DropItem "Clip", 160, 5
+  States
+  {
+  Missile:
+    POSS E 10 A_FaceTarget
+    POSS F 4  A_PosAttack
+    POSS E 10 A_FaceTarget
+    POSS F 4  A_PosAttack
+    POSS E 10
+    Goto See
+  }
+  Obituary "%o was riddled by a Flanking Zombieman (II)."
+}
+
+actor ZM_T3 : ZombieMan
+{
+  Tag "Puncturing Zombieman (III)"
+  Translation "TINT_TIER3"
+  Health 28
+  PainChance 180
+  Speed 9
+  DropItem "Clip", 255, 10
+  DropItem "Clip", 176, 5
+  States
+  {
+  Missile:
+    POSS E 10 A_FaceTarget
+    POSS F 4  A_PosAttack
+    POSS E 10 A_FaceTarget
+    POSS F 4  A_PosAttack
+    POSS E 10 A_FaceTarget
+    POSS F 4  A_PosAttack
+    POSS E 10
+    Goto See
+  }
+  Obituary "%o was stitched with lead by a Puncturing Zombieman (III)."
+}
+
+actor ZM_T4 : ZombieMan
+{
+  Tag "Suppressing Zombieman (IV)"
+  Translation "TINT_TIER4"
+  Health 32
+  PainChance 170
+  Speed 10
+  DropItem "Clip", 255, 10
+  DropItem "Clip", 192, 10
+  DropItem "Clip", 160, 5
+  States
+  {
+  Missile:
+    POSS E 10 A_FaceTarget
+    POSS F 4  A_PosAttack
+    POSS E 10 A_FaceTarget
+    POSS F 4  A_PosAttack
+    POSS E 10 A_FaceTarget
+    POSS F 4  A_PosAttack
+    POSS E 10 A_FaceTarget
+    POSS F 4  A_PosAttack
+    POSS E 10
+    Goto See
+  }
+  Obituary "%o was cut to pieces by a Suppressing Zombieman (IV)."
+}
+
+actor ZM_T5 : ZombieMan
+{
+  Tag "Executing Zombieman (V)"
+  Translation "TINT_TIER5"
+  Health 36
+  PainChance 160
+  Speed 10
+  DropItem "Clip", 255, 10
+  DropItem "Clip", 208, 10
+  DropItem "Clip", 176, 10
+  States
+  {
+  Missile:
+    POSS E 10 A_FaceTarget
+    POSS F 4  A_PosAttack
+    POSS E 10 A_FaceTarget
+    POSS F 4  A_PosAttack
+    POSS E 10 A_FaceTarget
+    POSS F 4  A_PosAttack
+    POSS E 10 A_FaceTarget
+    POSS F 4  A_PosAttack
+    POSS E 10 A_FaceTarget
+    POSS F 4  A_PosAttack
+    POSS E 10
+    Goto See
+  }
+  Obituary "%o was finished off by an Executing Zombieman (V)."
+}
+
+
+// =============================== SHOTGUN GUY (Seargent) (v1.1.1) ===============================
+// Strict vanilla cadence per shot; volleys 2/3/4/5.
+
+actor SG_T2 : ShotgunGuy
+{
+  Tag "Breaching Shotgunner (II)"
+  Translation "TINT_TIER2"
+  Health 36
+  PainChance 160
+  Speed 9
+  DropItem "Shotgun", 255
+  DropItem "Shell",   160, 2
+  States
+  {
+  Missile:
+    SPOS E 8  A_FaceTarget
+    SPOS F 3  A_SPosAttack
+    SPOS E 34 A_FaceTarget
+    SPOS F 3  A_SPosAttack
+    SPOS E 10
+    Goto See
+  }
+  Obituary "%o was torn open by a Breaching Seargent (II)."
+}
+
+actor SG_T3 : ShotgunGuy
+{
+  Tag "Cornering Shotgunner (III)"
+  Translation "TINT_TIER3"
+  Health 42
+  PainChance 150
+  Speed 9
+  DropItem "Shotgun", 255
+  DropItem "Shell",   192, 2
+  States
+  {
+  Missile:
+    SPOS E 8  A_FaceTarget
+    SPOS F 3  A_SPosAttack
+    SPOS E 34 A_FaceTarget
+    SPOS F 3  A_SPosAttack
+    SPOS E 34 A_FaceTarget
+    SPOS F 3  A_SPosAttack
+    SPOS E 10
+    Goto See
+  }
+  Obituary "%o was shredded at close range by a Cornering Seargent (III)."
+}
+
+actor SG_T4 : ShotgunGuy
+{
+  Tag "Punishing Shotgunner (IV)"
+  Translation "TINT_TIER4"
+  Health 48
+  PainChance 140
+  Speed 10
+  DropItem "Shotgun", 255
+  DropItem "Shell",   208, 3
+  States
+  {
+  Missile:
+    SPOS E 8  A_FaceTarget
+    SPOS F 3  A_SPosAttack
+    SPOS E 34 A_FaceTarget
+    SPOS F 3  A_SPosAttack
+    SPOS E 34 A_FaceTarget
+    SPOS F 3  A_SPosAttack
+    SPOS E 34 A_FaceTarget
+    SPOS F 3  A_SPosAttack
+    SPOS E 10
+    Goto See
+  }
+  Obituary "%o was blasted apart by a Punishing Seargent (IV)."
+}
+
+actor SG_T5 : ShotgunGuy
+{
+  Tag "Enforcing Shotgunner (V)"
+  Translation "TINT_TIER5"
+  Health 54
+  PainChance 130
+  Speed 10
+  DropItem "Shotgun", 255
+  DropItem "Shell",   224, 4
+  DropItem "Shell",   160, 2
+  States
+  {
+  Missile:
+    SPOS E 8  A_FaceTarget
+    SPOS F 3  A_SPosAttack
+    SPOS E 34 A_FaceTarget
+    SPOS F 3  A_SPosAttack
+    SPOS E 34 A_FaceTarget
+    SPOS F 3  A_SPosAttack
+    SPOS E 34 A_FaceTarget
+    SPOS F 3  A_SPosAttack
+    SPOS E 34 A_FaceTarget
+    SPOS F 3  A_SPosAttack
+    SPOS E 10
+    Goto See
+  }
+  Obituary "%o was cut down by an Enforcing Seargent (V)."
+}
+
+
+// =============================== IMP FAMILY (v1.1.3) ===============================
+// Fix: proper melee obits via HitObituary; add explicit Melee states.
+// Ranged volleys remain 2/3/4/5 via A_TroopAttack.
+
+actor IMP_T2 : DoomImp
+{
+  Tag "Barraging Imp (II)"
+  Translation "TINT_TIER2"
+  Health 72
+  PainChance 190
+  Speed 8
+  Obituary "%o was scorched by a Barraging Imp (II)."
+  HitObituary "%o was clawed apart by a Barraging Imp (II)."
+  States
+  {
+  Melee:
+    TROO E 8 A_FaceTarget
+    TROO F 8 A_TroopAttack
+    TROO E 6 A_FaceTarget
+    Goto See
+
+  Missile:
+    TROO E 8 A_FaceTarget
+    TROO F 8 A_TroopAttack
+    TROO E 8 A_FaceTarget
+    TROO F 8 A_TroopAttack
+    TROO E 8 A_FaceTarget
+    Goto See
+  }
+}
+
+actor IMP_T3 : DoomImp
+{
+  Tag "Howling Imp (III)"
+  Translation "TINT_TIER3"
+  Health 84
+  PainChance 180
+  Speed 8
+  Obituary "%o was riddled by a Howling Imp (III)."
+  HitObituary "%o was slashed by a Howling Imp (III)."
+  States
+  {
+  Melee:
+    TROO E 8 A_FaceTarget
+    TROO F 8 A_TroopAttack
+    TROO E 6 A_FaceTarget
+    Goto See
+
+  Missile:
+    TROO E 8 A_FaceTarget
+    TROO F 8 A_TroopAttack
+    TROO E 8 A_FaceTarget
+    TROO F 8 A_TroopAttack
+    TROO E 8 A_FaceTarget
+    TROO F 8 A_TroopAttack
+    TROO E 8 A_FaceTarget
+    Goto See
+  }
+}
+
+actor IMP_T4 : DoomImp
+{
+  Tag "Incinerating Imp (IV)"
+  Translation "TINT_TIER4"
+  Health 96
+  PainChance 170
+  Speed 9
+  Obituary "%o was turned to ash by an Incinerating Imp (IV)."
+  HitObituary "%o was gutted by an Incinerating Imp (IV)."
+  States
+  {
+  Melee:
+    TROO E 8 A_FaceTarget
+    TROO F 8 A_TroopAttack
+    TROO E 6 A_FaceTarget
+    Goto See
+
+  Missile:
+    TROO E 8 A_FaceTarget
+    TROO F 8 A_TroopAttack
+    TROO E 8 A_FaceTarget
+    TROO F 8 A_TroopAttack
+    TROO E 8 A_FaceTarget
+    TROO F 8 A_TroopAttack
+    TROO E 8 A_FaceTarget
+    TROO F 8 A_TroopAttack
+    TROO E 8 A_FaceTarget
+    Goto See
+  }
+}
+
+actor IMP_T5 : DoomImp
+{
+  Tag "Hellstorming Imp (V)"
+  Translation "TINT_TIER5"
+  Health 108
+  PainChance 160
+  Speed 10
+  Obituary "%o was obliterated by a Hellstorming Imp (V)."
+  HitObituary "%o was ripped open by a Hellstorming Imp (V)."
+  States
+  {
+  Melee:
+    TROO E 8 A_FaceTarget
+    TROO F 8 A_TroopAttack
+    TROO E 6 A_FaceTarget
+    Goto See
+
+  Missile:
+    TROO E 8 A_FaceTarget
+    TROO F 8 A_TroopAttack
+    TROO E 8 A_FaceTarget
+    TROO F 8 A_TroopAttack
+    TROO E 8 A_FaceTarget
+    TROO F 8 A_TroopAttack
+    TROO E 8 A_FaceTarget
+    TROO F 8 A_TroopAttack
+    TROO E 8 A_FaceTarget
+    TROO F 8 A_TroopAttack
+    TROO E 8 A_FaceTarget
+    Goto See
+  }
+}
+
+
+// =============================== DEMON FAMILY (v1.3.0) ===============================
+// Change: Reverted to vanilla melee cadence (single swipe).
+// Damage: Randomized between stock (4..40) and tier-scaled ceilings.
+// Obits: HitObituary used for melee so tiered text shows reliably.
+
+actor DEM_T2 : Demon
+{
+  Tag "Gorehound Demon (II)"
+  Translation "TINT_TIER2"
+  Speed 10
+  Health 180
+  PainChance 170
+  States
+  {
+  Melee:
+    SARG E 8 A_FaceTarget
+    SARG F 8 A_CustomMeleeAttack(randompick(random(4,40), random(4,48)))
+    Goto See
+  }
+  Obituary "%o was chewed apart by a Gorehound Demon (II)."
+  HitObituary "%o was chewed apart by a Gorehound Demon (II)."
+}
+
+actor DEM_T3 : Demon
+{
+  Tag "Ripping Demon (III)"
+  Translation "TINT_TIER3"
+  Speed 11
+  Health 210
+  PainChance 160
+  States
+  {
+  Melee:
+    SARG E 8 A_FaceTarget
+    SARG F 8 A_CustomMeleeAttack(randompick(random(4,40), random(4,56)))
+    Goto See
+  }
+  Obituary "%o was torn to ribbons by a Ripping Demon (III)."
+  HitObituary "%o was torn to ribbons by a Ripping Demon (III)."
+}
+
+actor DEM_T4 : Demon
+{
+  Tag "Mauling Demon (IV)"
+  Translation "TINT_TIER4"
+  Speed 12
+  Health 240
+  PainChance 150
+  States
+  {
+  Melee:
+    SARG E 8 A_FaceTarget
+    SARG F 8 A_CustomMeleeAttack(randompick(random(4,40), random(4,64)))
+    Goto See
+  }
+  Obituary "%o was savaged by a Mauling Demon (IV)."
+  HitObituary "%o was savaged by a Mauling Demon (IV)."
+}
+
+actor DEM_T5 : Demon
+{
+  Tag "Hellhound Demon (V)"
+  Translation "TINT_TIER5"
+  Speed 13
+  Health 270
+  PainChance 140
+  States
+  {
+  Melee:
+    SARG E 8 A_FaceTarget
+    SARG F 8 A_CustomMeleeAttack(randompick(random(4,40), random(4,72)))
+    Goto See
+  }
+  Obituary "%o was ripped limb from limb by a Hellhound Demon (V)."
+  HitObituary "%o was ripped limb from limb by a Hellhound Demon (V)."
+}
+
+
+// ================================ SPECTRE (v1.3.0) ================================
+// Change: Same vanilla cadence as Demon; inherits partial invisibility from base.
+// Damage: Same tier ranges; single swipe.
+// Obits: HitObituary used for melee.
+
+actor SPC_T2 : Spectre
+{
+  Tag "Shrouding Spectre (II)"
+  Translation "TINT_TIER2"
+  Speed 10
+  Health 180
+  PainChance 170
+  States
+  {
+  Melee:
+    SARG E 8 A_FaceTarget
+    SARG F 8 A_CustomMeleeAttack(randompick(random(4,40), random(4,48)))
+    Goto See
+  }
+  Obituary "%o was eviscerated from the dark by a Shrouding Spectre (II)."
+  HitObituary "%o was eviscerated from the dark by a Shrouding Spectre (II)."
+}
+
+actor SPC_T3 : Spectre
+{
+  Tag "Lurking Spectre (III)"
+  Translation "TINT_TIER3"
+  Speed 11
+  Health 210
+  PainChance 160
+  States
+  {
+  Melee:
+    SARG E 8 A_FaceTarget
+    SARG F 8 A_CustomMeleeAttack(randompick(random(4,40), random(4,56)))
+    Goto See
+  }
+  Obituary "%o was ambushed in the dark by a Lurking Spectre (III)."
+  HitObituary "%o was ambushed in the dark by a Lurking Spectre (III)."
+}
+
+actor SPC_T4 : Spectre
+{
+  Tag "Nightstalking Spectre (IV)"
+  Translation "TINT_TIER4"
+  Speed 12
+  Health 240
+  PainChance 150
+  States
+  {
+  Melee:
+    SARG E 8 A_FaceTarget
+    SARG F 8 A_CustomMeleeAttack(randompick(random(4,40), random(4,64)))
+    Goto See
+  }
+  Obituary "%o was torn from nowhere by a Nightstalking Spectre (IV)."
+  HitObituary "%o was torn from nowhere by a Nightstalking Spectre (IV)."
+}
+
+actor SPC_T5 : Spectre
+{
+  Tag "Vanishing Spectre (V)"
+  Translation "TINT_TIER5"
+  Speed 13
+  Health 270
+  PainChance 140
+  States
+  {
+  Melee:
+    SARG E 8 A_FaceTarget
+    SARG F 8 A_CustomMeleeAttack(randompick(random(4,40), random(4,72)))
+    Goto See
+  }
+  Obituary "%o was dragged into the void by a Vanishing Spectre (V)."
+  HitObituary "%o was dragged into the void by a Vanishing Spectre (V)."
+}
+
+
+
+// ============================== CHAINGUNNER (v1.1.1) ==============================
+// Continuous A_CPosAttack/A_CPosRefire loop. Cadence unchanged.
+
+actor CG_T2 : ChaingunGuy
+{
+  Tag "Raking Chaingunner (II)"
+  Translation "TINT_TIER2"
+  Health 84
+  PainChance 160
+  Speed 8
+  Obituary "%o was perforated by a Raking Chaingunner (II)."
+  DropItem "Chaingun", 255
+  DropItem "Clip",     176, 10
+  States
+  {
+  Missile:
+    CPOS E 8 A_FaceTarget
+    Goto Fire
+  Fire:
+    CPOS F 3 A_CPosAttack
+    CPOS E 3 A_FaceTarget
+    CPOS F 0 A_CPosRefire
+    Goto Fire
+  }
+}
+
+actor CG_T3 : ChaingunGuy
+{
+  Tag "Riddling Chaingunner (III)"
+  Translation "TINT_TIER3"
+  Health 98
+  PainChance 150
+  Speed 9
+  Obituary "%o was stitched with lead by a Riddling Chaingunner (III)."
+  DropItem "Chaingun", 255
+  DropItem "Clip",     192, 10
+  DropItem "Clip",     128, 5
+  States
+  {
+  Missile:
+    CPOS E 8 A_FaceTarget
+    Goto Fire
+  Fire:
+    CPOS F 3 A_CPosAttack
+    CPOS E 3 A_FaceTarget
+    CPOS F 0 A_CPosRefire
+    Goto Fire
+  }
+}
+
+actor CG_T4 : ChaingunGuy
+{
+  Tag "Saturating Chaingunner (IV)"
+  Translation "TINT_TIER4"
+  Health 112
+  PainChance 140
+  Speed 10
+  Obituary "%o was cut to ribbons by a Saturating Chaingunner (IV)."
+  DropItem "Chaingun", 255
+  DropItem "Clip",     208, 10
+  DropItem "Clip",     160, 10
+  DropItem "ClipBox",   24
+  States
+  {
+  Missile:
+    CPOS E 8 A_FaceTarget
+    Goto Fire
+  Fire:
+    CPOS F 3 A_CPosAttack
+    CPOS E 2 A_FaceTarget
+    CPOS F 0 A_CPosRefire
+    Goto Fire
+  }
+}
+
+actor CG_T5 : ChaingunGuy
+{
+  Tag "Shredding Chaingunner (V)"
+  Translation "TINT_TIER5"
+  Health 126
+  PainChance 130
+  Speed 10
+  Obituary "%o was turned into mince by a Shredding Chaingunner (V)."
+  DropItem "Chaingun", 255
+  DropItem "Clip",     224, 10
+  DropItem "Clip",     176, 10
+  DropItem "ClipBox",   32
+  States
+  {
+  Missile:
+    CPOS E 8 A_FaceTarget
+    Goto Fire
+  Fire:
+    CPOS F 3 A_CPosAttack
+    CPOS E 2 A_FaceTarget
+    CPOS F 0 A_CPosRefire
+    Goto Fire
+  }
+}
+
+
+// ============================== HELL KNIGHT (v1.1.1) ==============================
+// Fix: proper melee obits via HitObituary (DECORATE-only).
+// Keep strict stock throw animation per shot; volleys 2/3/4/5.
+// Note: A_BruisAttack handles melee vs missile; explicit Melee state ensures HitObituary path.
+
+actor HK_T2 : HellKnight
+{
+  Tag "Barraging Hell Knight (II)"
+  Translation "TINT_TIER2"
+  Speed 8
+  Health 520
+  PainChance 120
+  Obituary "%o was battered by a Barraging Hell Knight (II)."
+  HitObituary "%o was battered by a Barraging Hell Knight (II)."
+  States
+  {
+  Melee:
+    BOS2 E 8 A_FaceTarget
+    BOS2 F 8 A_FaceTarget
+    BOS2 G 8 A_BruisAttack
+    Goto See
+
+  Missile:
+    BOS2 E 8 A_FaceTarget
+    BOS2 F 8 A_FaceTarget
+    BOS2 G 8 A_BruisAttack
+    BOS2 E 8 A_FaceTarget
+    BOS2 F 8 A_FaceTarget
+    BOS2 G 8 A_BruisAttack
+    Goto See
+  }
+}
+
+actor HK_T3 : HellKnight
+{
+  Tag "Blighting Hell Knight (III)"
+  Translation "TINT_TIER3"
+  Speed 9
+  Health 540
+  PainChance 110
+  Obituary "%o was ruined by a Blighting Hell Knight (III)."
+  HitObituary "%o was ruined by a Blighting Hell Knight (III)."
+  States
+  {
+  Melee:
+    BOS2 E 8 A_FaceTarget
+    BOS2 F 8 A_FaceTarget
+    BOS2 G 8 A_BruisAttack
+    Goto See
+
+  Missile:
+    BOS2 E 8 A_FaceTarget
+    BOS2 F 8 A_FaceTarget
+    BOS2 G 8 A_BruisAttack
+    BOS2 E 8 A_FaceTarget
+    BOS2 F 8 A_FaceTarget
+    BOS2 G 8 A_BruisAttack
+    BOS2 E 8 A_FaceTarget
+    BOS2 F 8 A_FaceTarget
+    BOS2 G 8 A_BruisAttack
+    Goto See
+  }
+}
+
+actor HK_T4 : HellKnight
+{
+  Tag "Condemning Hell Knight (IV)"
+  Translation "TINT_TIER4"
+  Speed 9
+  Health 560
+  PainChance 100
+  Obituary "%o was cast down by a Condemning Hell Knight (IV)."
+  HitObituary "%o was cast down by a Condemning Hell Knight (IV)."
+  States
+  {
+  Melee:
+    BOS2 E 8 A_FaceTarget
+    BOS2 F 8 A_FaceTarget
+    BOS2 G 8 A_BruisAttack
+    Goto See
+
+  Missile:
+    BOS2 E 8 A_FaceTarget
+    BOS2 F 8 A_FaceTarget
+    BOS2 G 8 A_BruisAttack
+    BOS2 E 8 A_FaceTarget
+    BOS2 F 8 A_FaceTarget
+    BOS2 G 8 A_BruisAttack
+    BOS2 E 8 A_FaceTarget
+    BOS2 F 8 A_FaceTarget
+    BOS2 G 8 A_BruisAttack
+    BOS2 E 8 A_FaceTarget
+    BOS2 F 8 A_FaceTarget
+    BOS2 G 8 A_BruisAttack
+    Goto See
+  }
+}
+
+actor HK_T5 : HellKnight
+{
+  Tag "Catalysmic Hell Knight (V)"
+  Translation "TINT_TIER5"
+  Speed 10
+  Health 580
+  PainChance 90
+  Obituary "%o was annihilated by a Catalysmic Hell Knight (V)."
+  HitObituary "%o was annihilated by a Catalysmic Hell Knight (V)."
+  States
+  {
+  Melee:
+    BOS2 E 8 A_FaceTarget
+    BOS2 F 8 A_FaceTarget
+    BOS2 G 8 A_BruisAttack
+    Goto See
+
+  Missile:
+    BOS2 E 8 A_FaceTarget
+    BOS2 F 8 A_FaceTarget
+    BOS2 G 8 A_BruisAttack
+    BOS2 E 8 A_FaceTarget
+    BOS2 F 8 A_FaceTarget
+    BOS2 G 8 A_BruisAttack
+    BOS2 E 8 A_FaceTarget
+    BOS2 F 8 A_FaceTarget
+    BOS2 G 8 A_BruisAttack
+    BOS2 E 8 A_FaceTarget
+    BOS2 F 8 A_FaceTarget
+    BOS2 G 8 A_BruisAttack
+    BOS2 E 8 A_FaceTarget
+    BOS2 F 8 A_FaceTarget
+    BOS2 G 8 A_BruisAttack
+    Goto See
+  }
+}
+
+
+// ============================ BARON OF HELL (v1.1.1) ============================
+// Fix: proper melee obits via HitObituary (DECORATE-only).
+// Mirrors HK approach with Baron stats; strict throw cadence preserved.
+
+actor BAR_T2 : BaronOfHell
+{
+  Tag "Barraging Baron of Hell (II)"
+  Translation "TINT_TIER2"
+  Speed 8
+  Health 1040
+  PainChance 120
+  Obituary "%o was broken by a Barraging Baron of Hell (II)."
+  HitObituary "%o was broken by a Barraging Baron of Hell (II)."
+  States
+  {
+  Melee:
+    BOSS E 8 A_FaceTarget
+    BOSS F 8 A_FaceTarget
+    BOSS G 8 A_BruisAttack
+    Goto See
+
+  Missile:
+    BOSS E 8 A_FaceTarget
+    BOSS F 8 A_FaceTarget
+    BOSS G 8 A_BruisAttack
+    BOSS E 8 A_FaceTarget
+    BOSS F 8 A_FaceTarget
+    BOSS G 8 A_BruisAttack
+    Goto See
+  }
+}
+
+actor BAR_T3 : BaronOfHell
+{
+  Tag "Damnating Baron of Hell (III)"
+  Translation "TINT_TIER3"
+  Speed 9
+  Health 1080
+  PainChance 110
+  Obituary "%o was murdered by a Damnating Baron of Hell (III)."
+  HitObituary "%o was murdered by a Damnating Baron of Hell (III)."
+  States
+  {
+  Melee:
+    BOSS E 8 A_FaceTarget
+    BOSS F 8 A_FaceTarget
+    BOSS G 8 A_BruisAttack
+    Goto See
+
+  Missile:
+    BOSS E 8 A_FaceTarget
+    BOSS F 8 A_FaceTarget
+    BOSS G 8 A_BruisAttack
+    BOSS E 8 A_FaceTarget
+    BOSS F 8 A_FaceTarget
+    BOSS G 8 A_BruisAttack
+    BOSS E 8 A_FaceTarget
+    BOSS F 8 A_FaceTarget
+    BOSS G 8 A_BruisAttack
+    Goto See
+  }
+}
+
+actor BAR_T4 : BaronOfHell
+{
+  Tag "Devastating Baron of Hell (IV)"
+  Translation "TINT_TIER4"
+  Speed 9
+  Health 1120
+  PainChance 100
+  Obituary "%o was crushed by a Devastating Baron of Hell (IV)."
+  HitObituary "%o was crushed by a Devastating Baron of Hell (IV)."
+  States
+  {
+  Melee:
+    BOSS E 8 A_FaceTarget
+    BOSS F 8 A_FaceTarget
+    BOSS G 8 A_BruisAttack
+    Goto See
+
+  Missile:
+    BOSS E 8 A_FaceTarget
+    BOSS F 8 A_FaceTarget
+    BOSS G 8 A_BruisAttack
+    BOSS E 8 A_FaceTarget
+    BOSS F 8 A_FaceTarget
+    BOSS G 8 A_BruisAttack
+    BOSS E 8 A_FaceTarget
+    BOSS F 8 A_FaceTarget
+    BOSS G 8 A_BruisAttack
+    BOSS E 8 A_FaceTarget
+    BOSS F 8 A_FaceTarget
+    BOSS G 8 A_BruisAttack
+    Goto See
+  }
+}
+
+actor BAR_T5 : BaronOfHell
+{
+  Tag "Obliterating Baron of Hell (V)"
+  Translation "TINT_TIER5"
+  Speed 10
+  Health 1160
+  PainChance 90
+  Obituary "%o met the end at the hands of an Obliterating Baron of Hell (V)."
+  HitObituary "%o met the end at the hands of an Obliterating Baron of Hell (V)."
+  States
+  {
+  Melee:
+    BOSS E 8 A_FaceTarget
+    BOSS F 8 A_FaceTarget
+    BOSS G 8 A_BruisAttack
+    Goto See
+
+  Missile:
+    BOSS E 8 A_FaceTarget
+    BOSS F 8 A_FaceTarget
+    BOSS G 8 A_BruisAttack
+    BOSS E 8 A_FaceTarget
+    BOSS F 8 A_FaceTarget
+    BOSS G 8 A_BruisAttack
+    BOSS E 8 A_FaceTarget
+    BOSS F 8 A_FaceTarget
+    BOSS G 8 A_BruisAttack
+    BOSS E 8 A_FaceTarget
+    BOSS F 8 A_FaceTarget
+    BOSS G 8 A_BruisAttack
+    BOSS E 8 A_FaceTarget
+    BOSS F 8 A_FaceTarget
+    BOSS G 8 A_BruisAttack
+    Goto See
+  }
+}
+
+
+// ============================== CACODEMON (v1.0.0) ==============================
+// Keep exact muzzle/timing; A_HeadAttack auto-bites at melee.
+
+actor CAC_T2 : Cacodemon
+{
+  Tag "Storming Cacodemon (II)"
+  Translation "TINT_TIER2"
+  Health 440
+  PainChance 120
+  Speed 8
+  States
+  {
+  Missile:
+    HEAD B 5 A_FaceTarget
+    HEAD C 5 A_FaceTarget
+    HEAD D 5 BRIGHT A_HeadAttack
+    HEAD B 5 A_FaceTarget
+    HEAD C 5 A_FaceTarget
+    HEAD D 5 BRIGHT A_HeadAttack
+    HEAD C 6
+    Goto See
+  }
+  Obituary "%o was thundered apart by a Storming Cacodemon (II)."
+}
+
+actor CAC_T3 : Cacodemon
+{
+  Tag "Surging Cacodemon (III)"
+  Translation "TINT_TIER3"
+  Health 480
+  PainChance 112
+  Speed 8
+  States
+  {
+  Missile:
+    HEAD B 5 A_FaceTarget
+    HEAD C 5 A_FaceTarget
+    HEAD D 5 BRIGHT A_HeadAttack
+    HEAD B 5 A_FaceTarget
+    HEAD C 5 A_FaceTarget
+    HEAD D 5 BRIGHT A_HeadAttack
+    HEAD B 5 A_FaceTarget
+    HEAD C 5 A_FaceTarget
+    HEAD D 5 BRIGHT A_HeadAttack
+    HEAD C 6
+    Goto See
+  }
+  Obituary "%o was torn by a Surging Cacodemon (III)."
+}
+
+actor CAC_T4 : Cacodemon
+{
+  Tag "Ravaging Cacodemon (IV)"
+  Translation "TINT_TIER4"
+  Health 520
+  PainChance 104
+  Speed 8
+  States
+  {
+  Missile:
+    HEAD B 5 A_FaceTarget
+    HEAD C 5 A_FaceTarget
+    HEAD D 5 BRIGHT A_HeadAttack
+    HEAD B 5 A_FaceTarget
+    HEAD C 5 A_FaceTarget
+    HEAD D 5 BRIGHT A_HeadAttack
+    HEAD B 5 A_FaceTarget
+    HEAD C 5 A_FaceTarget
+    HEAD D 5 BRIGHT A_HeadAttack
+    HEAD B 5 A_FaceTarget
+    HEAD C 5 A_FaceTarget
+    HEAD D 5 BRIGHT A_HeadAttack
+    HEAD C 6
+    Goto See
+  }
+  Obituary "%o was swallowed whole by a Ravaging Cacodemon (IV)."
+}
+
+actor CAC_T5 : Cacodemon
+{
+  Tag "Annihilating Cacodemon (V)"
+  Translation "TINT_TIER5"
+  Health 560
+  PainChance 96
+  Speed 8
+  States
+  {
+  Missile:
+    HEAD B 5 A_FaceTarget
+    HEAD C 5 A_FaceTarget
+    HEAD D 5 BRIGHT A_HeadAttack
+    HEAD B 5 A_FaceTarget
+    HEAD C 5 A_FaceTarget
+    HEAD D 5 BRIGHT A_HeadAttack
+    HEAD B 5 A_FaceTarget
+    HEAD C 5 A_FaceTarget
+    HEAD D 5 BRIGHT A_HeadAttack
+    HEAD B 5 A_FaceTarget
+    HEAD C 5 A_FaceTarget
+    HEAD D 5 BRIGHT A_HeadAttack
+    HEAD B 5 A_FaceTarget
+    HEAD C 5 A_FaceTarget
+    HEAD D 5 BRIGHT A_HeadAttack
+    HEAD C 6
+    Goto See
+  }
+  Obituary "%o was erased by an Annihilating Cacodemon (V)."
+}
+
+
+// =============================== LOST SOUL (v1.1.2) ===============================
+// Keep actor names (LSO_T2..LSO_T5). Vanilla attack frames kept (C→D SkullAttack; loop CD).
+// Randomized damage: base Damage=3 (stock), with tiered chance to apply a short PowerDamage buff.
+// T2: 33% ×1.33, T3: 50% ×1.67, T4: 66% ×2.00, T5: 75% ×2.33.
+
+// ---- transient bite-boost powerups (auto-activate; not map pickups) ----
+actor LSO_BiteBoost_T2 : PowerDamage
+{
+  +INVENTORY.AUTOACTIVATE
+  Inventory.MaxAmount 1
+  Powerup.Duration 25
+  DamageFactor "Normal", 1.3333
+}
+actor LSO_BiteBoost_T3 : PowerDamage
+{
+  +INVENTORY.AUTOACTIVATE
+  Inventory.MaxAmount 1
+  Powerup.Duration 25
+  DamageFactor "Normal", 1.6667
+}
+actor LSO_BiteBoost_T4 : PowerDamage
+{
+  +INVENTORY.AUTOACTIVATE
+  Inventory.MaxAmount 1
+  Powerup.Duration 25
+  DamageFactor "Normal", 2.0
+}
+actor LSO_BiteBoost_T5 : PowerDamage
+{
+  +INVENTORY.AUTOACTIVATE
+  Inventory.MaxAmount 1
+  Powerup.Duration 25
+  DamageFactor "Normal", 2.3333
+}
+
+// ------------------------------- TIER II -----------------------------------
+actor LSO_T2 : LostSoul
+{
+  Tag "Ramming Lost Soul (II)"
+  Translation "TINT_TIER2"
+  Health 110
+  Speed 9
+  PainChance 220
+  Damage 3
+  Obituary "%o was smashed head-on by a Ramming Lost Soul (II)."
+  States
+  {
+  Missile:
+    SKUL C 10 BRIGHT A_FaceTarget
+    SKUL D 0  BRIGHT A_Jump(85, "ChargeBuff") // ~33%
+    SKUL D 4  BRIGHT A_SkullAttack(22)
+    SKUL CD 4 BRIGHT
+    Goto Missile+2
+
+  ChargeBuff:
+    TNT1 A 0 A_GiveInventory("LSO_BiteBoost_T2",1)
+    SKUL D 4  BRIGHT A_SkullAttack(22)
+    SKUL CD 4 BRIGHT
+    Goto Missile+2
+  }
+}
+
+// ------------------------------- TIER III ----------------------------------
+actor LSO_T3 : LostSoul
+{
+  Tag "Impaling Lost Soul (III)"
+  Translation "TINT_TIER3"
+  Health 120
+  Speed 10
+  PainChance 200
+  Damage 3
+  Obituary "%o was skewered by an Impaling Lost Soul (III)."
+  States
+  {
+  Missile:
+    SKUL C 10 BRIGHT A_FaceTarget
+    SKUL D 0  BRIGHT A_Jump(128, "ChargeBuff") // 50%
+    SKUL D 4  BRIGHT A_SkullAttack(24)
+    SKUL CD 4 BRIGHT
+    Goto Missile+2
+
+  ChargeBuff:
+    TNT1 A 0 A_GiveInventory("LSO_BiteBoost_T3",1)
+    SKUL D 4  BRIGHT A_SkullAttack(24)
+    SKUL CD 4 BRIGHT
+    Goto Missile+2
+  }
+}
+
+// ------------------------------- TIER IV -----------------------------------
+actor LSO_T4 : LostSoul
+{
+  Tag "Harrowing Lost Soul (IV)"
+  Translation "TINT_TIER4"
+  Health 130
+  Speed 11
+  PainChance 180
+  Damage 3
+  Obituary "%o was run down by a Harrowing Lost Soul (IV)."
+  States
+  {
+  Missile:
+    SKUL C 10 BRIGHT A_FaceTarget
+    SKUL D 0  BRIGHT A_Jump(170, "ChargeBuff") // ~66%
+    SKUL D 4  BRIGHT A_SkullAttack(26)
+    SKUL CD 4 BRIGHT
+    Goto Missile+2
+
+  ChargeBuff:
+    TNT1 A 0 A_GiveInventory("LSO_BiteBoost_T4",1)
+    SKUL D 4  BRIGHT A_SkullAttack(26)
+    SKUL CD 4 BRIGHT
+    Goto Missile+2
+  }
+}
+
+// ------------------------------- TIER V ------------------------------------
+actor LSO_T5 : LostSoul
+{
+  Tag "Tormenting Lost Soul (V)"
+  Translation "TINT_TIER5"
+  Health 140
+  Speed 12
+  PainChance 160
+  Damage 3
+  Obituary "%o was incinerated by a Tormenting Lost Soul (V)."
+  States
+  {
+  Missile:
+    SKUL C 10 BRIGHT A_FaceTarget
+    SKUL D 0  BRIGHT A_Jump(192, "ChargeBuff") // 75%
+    SKUL D 4  BRIGHT A_SkullAttack(28)
+    SKUL CD 4 BRIGHT
+    Goto Missile+2
+
+  ChargeBuff:
+    TNT1 A 0 A_GiveInventory("LSO_BiteBoost_T5",1)
+    SKUL D 4  BRIGHT A_SkullAttack(28)
+    SKUL CD 4 BRIGHT
+    Goto Missile+2
+  }
+}
+
+
+// =============================== REVENANT (v1.0.2) ===============================
+// Fix: GZDoom DECORATE does not support MeleeObituary on monsters; removed.
+// (If distinct melee obits are needed later: use A_CustomMeleeAttack with a DamageType
+// and add a LANGUAGE lump obituary for that type.)
+
+actor REV_T2 : Revenant
+{
+  Tag "Hexbone Revenant (II)"
+  Translation "TINT_TIER2"
+  Health 360
+  PainChance 90
+  Speed 10
+  Obituary "%o was slain by a Hexbone Revenant (II)"
+  States
+  {
+  Melee:
+    SKEL G 0 A_FaceTarget
+    SKEL G 6 A_SkelWhoosh
+    SKEL H 6 A_FaceTarget
+    SKEL I 6 A_SkelFist
+    Goto See
+
+  Missile:
+    SKEL J 0  BRIGHT A_FaceTarget
+    SKEL J 10 BRIGHT A_FaceTarget
+    SKEL K 10        A_SkelMissile
+    SKEL K 6         A_FaceTarget
+    SKEL J 6  BRIGHT A_FaceTarget
+    SKEL K 10        A_SkelMissile
+    SKEL K 8         A_FaceTarget
+    Goto See
+  }
+}
+
+actor REV_T3 : Revenant
+{
+  Tag "Shrieking Revenant (III)"
+  Translation "TINT_TIER3"
+  Health 420
+  PainChance 80
+  Speed 10
+  Obituary "%o was wailed to bits by a Shrieking Revenant (III)."
+  States
+  {
+  Melee:
+    SKEL G 0 A_FaceTarget
+    SKEL G 6 A_SkelWhoosh
+    SKEL H 6 A_FaceTarget
+    SKEL I 6 A_SkelFist
+    Goto See
+
+  Missile:
+    SKEL J 0  BRIGHT A_FaceTarget
+    SKEL J 10 BRIGHT A_FaceTarget
+    SKEL K 10        A_SkelMissile
+    SKEL K 6         A_FaceTarget
+    SKEL J 6  BRIGHT A_FaceTarget
+    SKEL K 10        A_SkelMissile
+    SKEL K 6         A_FaceTarget
+    SKEL J 6  BRIGHT A_FaceTarget
+    SKEL K 10        A_SkelMissile
+    SKEL K 8         A_FaceTarget
+    Goto See
+  }
+}
+
+actor REV_T4 : Revenant
+{
+  Tag "Wailing Revenant (IV)"
+  Translation "TINT_TIER4"
+  Health 480
+  PainChance 70
+  Speed 11
+  Obituary "%o was unmade by a Wailing Revenant (IV)."
+  States
+  {
+  Melee:
+    SKEL G 0 A_FaceTarget
+    SKEL G 6 A_SkelWhoosh
+    SKEL H 6 A_FaceTarget
+    SKEL I 6 A_SkelFist
+    Goto See
+
+  Missile:
+    SKEL J 0  BRIGHT A_FaceTarget
+    SKEL J 10 BRIGHT A_FaceTarget
+    SKEL K 10        A_SkelMissile
+    SKEL K 6         A_FaceTarget
+    SKEL J 6  BRIGHT A_FaceTarget
+    SKEL K 10        A_SkelMissile
+    SKEL K 6         A_FaceTarget
+    SKEL J 6  BRIGHT A_FaceTarget
+    SKEL K 10        A_SkelMissile
+    SKEL K 6         A_FaceTarget
+    SKEL J 6  BRIGHT A_FaceTarget
+    SKEL K 10        A_SkelMissile
+    SKEL K 8         A_FaceTarget
+    Goto See
+  }
+}
+
+actor REV_T5 : Revenant
+{
+  Tag "Lamenting Revenant (V)"
+  Translation "TINT_TIER5"
+  Health 540
+  PainChance 60
+  Speed 11
+  Obituary "%o was sent off by a Lamenting Revenant (V)."
+  States
+  {
+  Melee:
+    SKEL G 0 A_FaceTarget
+    SKEL G 6 A_SkelWhoosh
+    SKEL H 6 A_FaceTarget
+    SKEL I 6 A_SkelFist
+    Goto See
+
+  Missile:
+    SKEL J 0  BRIGHT A_FaceTarget
+    SKEL J 10 BRIGHT A_FaceTarget
+    SKEL K 10        A_SkelMissile
+    SKEL K 6         A_FaceTarget
+    SKEL J 6  BRIGHT A_FaceTarget
+    SKEL K 10        A_SkelMissile
+    SKEL K 6         A_FaceTarget
+    SKEL J 6  BRIGHT A_FaceTarget
+    SKEL K 10        A_SkelMissile
+    SKEL K 6         A_FaceTarget
+    SKEL J 6  BRIGHT A_FaceTarget
+    SKEL K 10        A_SkelMissile
+    SKEL K 6         A_FaceTarget
+    SKEL J 6  BRIGHT A_FaceTarget
+    SKEL K 10        A_SkelMissile
+    SKEL K 8         A_FaceTarget
+    Goto See
+  }
+}
+
+
+
+// =========================== ARACHNOTRON (v1.0.1) ===========================
+
+actor ARA_T2 : Arachnotron
+{
+  Tag "Suppressing Arachnotron (II)"
+  Translation "TINT_TIER2"
+  -BOSSDEATH
+  +MAP07BOSS2
+  Health 560
+  PainChance 120
+  Speed 8
+  Obituary "%o was blasted by a Suppressing Arachnotron (II)."
+  States
+  {
+  Missile:
+    BSPI A 10 BRIGHT A_FaceTarget
+    Goto Fire
+  Fire:
+    BSPI G 4  BRIGHT A_BspiAttack
+    BSPI H 4  BRIGHT
+    BSPI H 1  BRIGHT A_SpidRefire
+    Goto Fire
+  Death:
+    BSPI J 20 A_Scream
+    BSPI K 7  A_NoBlocking
+    BSPI LMNO 7
+    BSPI P -1
+    Stop
+  }
+}
+
+actor ARA_T3 : Arachnotron
+{
+  Tag "Overcharging Arachnotron (III)"
+  Translation "TINT_TIER3"
+  -BOSSDEATH
+  +MAP07BOSS2
+  Health 620
+  PainChance 105
+  Speed 8
+  Obituary "%o was boiled alive by an Overcharging Arachnotron (III)."
+  States
+  {
+  Missile:
+    BSPI A 10 BRIGHT A_FaceTarget
+    Goto Fire
+  Fire:
+    BSPI G 3  BRIGHT A_BspiAttack
+    BSPI H 3  BRIGHT
+    BSPI H 1  BRIGHT A_SpidRefire
+    Goto Fire
+  Death:
+    BSPI J 20 A_Scream
+    BSPI K 7  A_NoBlocking
+    BSPI LMNO 7
+    BSPI P -1
+    Stop
+  }
+}
+
+actor ARA_T4 : Arachnotron
+{
+  Tag "Serrating Arachnotron (IV)"
+  Translation "TINT_TIER4"
+  -BOSSDEATH
+  +MAP07BOSS2
+  Health 680
+  PainChance 90
+  Speed 9
+  Obituary "%o was scourged by a Serrating Arachnotron (IV)."
+  States
+  {
+  Missile:
+    BSPI A 8 BRIGHT A_FaceTarget
+    Goto Fire
+  Fire:
+    BSPI G 3  BRIGHT A_BspiAttack
+    BSPI H 2  BRIGHT
+    BSPI G 3  BRIGHT A_BspiAttack
+    BSPI H 3  BRIGHT
+    BSPI H 1  BRIGHT A_SpidRefire
+    Goto Fire
+  Death:
+    BSPI J 20 A_Scream
+    BSPI K 7  A_NoBlocking
+    BSPI LMNO 7
+    BSPI P -1
+    Stop
+  }
+}
+
+actor ARA_T5 : Arachnotron
+{
+  Tag "Storming Arachnotron (V)"
+  Translation "TINT_TIER5"
+  -BOSSDEATH
+  +MAP07BOSS2
+  Health 740
+  PainChance 80
+  Speed 9
+  Obituary "%o was melted to the bone by a Storming Arachnotron (V)."
+  States
+  {
+  Missile:
+    BSPI A 8 BRIGHT A_FaceTarget
+    Goto Fire
+  Fire:
+    BSPI G 2  BRIGHT A_BspiAttack
+    BSPI H 2  BRIGHT
+    BSPI G 2  BRIGHT A_BspiAttack
+    BSPI H 2  BRIGHT
+    BSPI H 1  BRIGHT A_SpidRefire
+    Goto Fire
+  Death:
+    BSPI J 20 A_Scream
+    BSPI K 7  A_NoBlocking
+    BSPI LMNO 7
+    BSPI P -1
+    Stop
+  }
+}
+
+
+// ============================ MANCUBUS (v1.0.2) ============================
+// Fix: vanilla cadence — G for raise, H BRIGHT for shots, IG face ticks between.
+// Source cadence mirrors Doom's example. Extra volleys preserved per tier.
+
+actor MAN_T2 : Fatso
+{
+  Tag "Barraging Mancubus (II)"
+  Translation "TINT_TIER2"
+  -BOSSDEATH
+  +MAP07BOSS1
+  Health 720
+  PainChance 150
+  Speed 8
+  Obituary "%o was scorched by a Barraging Mancubus (II)."
+  States
+  {
+  Missile:
+    FATT G 10 A_FatRaise
+    Goto Fire
+  Fire:
+    FATT H 8  BRIGHT A_FatAttack1
+    FATT IG 6         A_FaceTarget
+    FATT H 8  BRIGHT A_FatAttack2
+    FATT IG 6         A_FaceTarget
+    FATT H 8  BRIGHT A_FatAttack3
+    FATT IG 8
+    Goto See
+  Death:
+    FATT K 6
+    FATT L 6 A_Scream
+    FATT M 6 A_NoBlocking
+    FATT NOPQRS 6
+    FATT T -1
+    Stop
+  }
+}
+
+actor MAN_T3 : Fatso
+{
+  Tag "Bombarding Mancubus (III)"
+  Translation "TINT_TIER3"
+  -BOSSDEATH
+  +MAP07BOSS1
+  Health 780
+  PainChance 135
+  Speed 8
+  Obituary "%o was charred by a Bombarding Mancubus (III)."
+  States
+  {
+  Missile:
+    FATT G 8 A_FatRaise
+    Goto Fire
+  Fire:
+    FATT H 7  BRIGHT A_FatAttack1
+    FATT IG 5         A_FaceTarget
+    FATT H 7  BRIGHT A_FatAttack2
+    FATT IG 5         A_FaceTarget
+    FATT H 7  BRIGHT A_FatAttack3
+    FATT IG 7
+    Goto See
+  Death:
+    FATT K 6
+    FATT L 6 A_Scream
+    FATT M 6 A_NoBlocking
+    FATT NOPQRS 6
+    FATT T -1
+    Stop
+  }
+}
+
+actor MAN_T4 : Fatso
+{
+  Tag "Besieging Mancubus (IV)"
+  Translation "TINT_TIER4"
+  -BOSSDEATH
+  +MAP07BOSS1
+  Health 840
+  PainChance 120
+  Speed 9
+  Obituary "%o was roasted alive by a Besieging Mancubus (IV)."
+  States
+  {
+  Missile:
+    FATT G 8 A_FatRaise
+    Goto Fire
+  Fire:
+    FATT H 6  BRIGHT A_FatAttack1
+    FATT IG 4         A_FaceTarget
+    FATT H 6  BRIGHT A_FatAttack2
+    FATT IG 4         A_FaceTarget
+    FATT H 6  BRIGHT A_FatAttack3
+    FATT IG 4         A_FaceTarget
+    FATT H 6  BRIGHT A_FatAttack1
+    FATT IG 4         A_FaceTarget
+    FATT H 6  BRIGHT A_FatAttack2
+    FATT IG 4         A_FaceTarget
+    FATT H 6  BRIGHT A_FatAttack3
+    FATT IG 8
+    Goto See
+  Death:
+    FATT K 6
+    FATT L 6 A_Scream
+    FATT M 6 A_NoBlocking
+    FATT NOPQRS 6
+    FATT T -1
+    Stop
+  }
+}
+
+actor MAN_T5 : Fatso
+{
+  Tag "Incinerating Mancubus (V)"
+  Translation "TINT_TIER5"
+  -BOSSDEATH
+  +MAP07BOSS1
+  Health 900
+  PainChance 110
+  Speed 9
+  Obituary "%o was cooked by an Incinerating Mancubus (V)."
+  States
+  {
+  Missile:
+    FATT G 6 A_FatRaise
+    Goto Fire
+  Fire:
+    FATT H 5  BRIGHT A_FatAttack1
+    FATT IG 3         A_FaceTarget
+    FATT H 5  BRIGHT A_FatAttack2
+    FATT IG 3         A_FaceTarget
+    FATT H 5  BRIGHT A_FatAttack3
+    FATT IG 3         A_FaceTarget
+    FATT H 5  BRIGHT A_FatAttack1
+    FATT IG 3         A_FaceTarget
+    FATT H 5  BRIGHT A_FatAttack2
+    FATT IG 3         A_FaceTarget
+    FATT H 5  BRIGHT A_FatAttack3
+    FATT IG 8
+    Goto See
+  Death:
+    FATT K 6
+    FATT L 6 A_Scream
+    FATT M 6 A_NoBlocking
+    FATT NOPQRS 6
+    FATT T -1
+    Stop
+  }
+}
+
+
+
+// ============================== PAIN ELEMENTAL (v1.0.3) ==============================
+// v1.0.3: Revert to *vanilla* attack behavior (inherit stock Missile: PELA E→F→G A_PainAttack).
+//         Keep only stat scaling + naming/obits. No custom states here.
+// Notes: 4-char sprite name is PELA; stock frames aren't BRIGHT; no jump logic.
+
+// ---- T2 ---------------------------------------------------------------------
+actor PEL_T2 : PainElemental
+{
+  Tag "Soul-Gnawing Pain Elemental (II)"
+  Translation "TINT_TIER2"
+  Health 320
+  PainChance 150
+  Speed 8
+  Obituary "%o was fed to the swarm by a Soul-Gnawing Pain Elemental (II)."
+}
+
+// ---- T3 ---------------------------------------------------------------------
+actor PEL_T3 : PainElemental
+{
+  Tag "Soul-Reaping Pain Elemental (III)"
+  Translation "TINT_TIER3"
+  Health 360
+  PainChance 140
+  Speed 8
+  Obituary "%o was drained of spirit by a Soul-Reaping Pain Elemental (III)."
+}
+
+// ---- T4 ---------------------------------------------------------------------
+actor PEL_T4 : PainElemental
+{
+  Tag "Soul-Devouring Pain Elemental (IV)"
+  Translation "TINT_TIER4"
+  Health 400
+  PainChance 130
+  Speed 9
+  Obituary "%o was devoured from within by a Soul-Devouring Pain Elemental (IV)."
+}
+
+// ---- T5 ---------------------------------------------------------------------
+actor PEL_T5 : PainElemental
+{
+  Tag "Soul-Consuming Pain Elemental (V)"
+  Translation "TINT_TIER5"
+  Health 440
+  PainChance 120
+  Speed 9
+  Obituary "%o was erased in screams by a Soul-Consuming Pain Elemental (V)."
+}
+
+
+
+// ============================== ARCHVILE (v1.0.0) ==============================
+// Design: DO NOT touch vanilla attack/resurrection logic.
+// - Inherit stock Missile/See/Death so VILE A→... cadence, A_VileStart/Target/Attack,
+//   and corpse-resurrection via A_VileChase remain 100% vanilla.
+// - Tier scaling: modest Health↑, small Speed↑ at IV–V, PainChance↓ (harder to stunlock).
+// - Names use your “-ing” style where it sounds good; obits avoid repeating that word.
+
+// ---- T2: light bump ----------------------------------------------------------
+actor ARC_T2 : Archvile
+{
+  Tag "Searing Archvile (II)"
+  Translation "TINT_TIER2"
+  Health 840                 // ~+20% vs stock
+  PainChance 9               // stock is ~10; flinch slightly less
+  Speed 15                   // stock pace feel
+  Obituary "%o was fried by a Searing Archvile (II)."
+}
+
+// ---- T3: moderate bump -------------------------------------------------------
+actor ARC_T3 : Archvile
+{
+  Tag "Blistering Archvile (III)"
+  Translation "TINT_TIER3"
+  Health 900                 // ~+30%
+  PainChance 8
+  Speed 15
+  Obituary "%o was set ablaze by a Blistering Archvile (III)."
+}
+
+// ---- T4: serious bump --------------------------------------------------------
+actor ARC_T4 : Archvile
+{
+  Tag "Immolating Archvile (IV)"
+  Translation "TINT_TIER4"
+  Health 960                 // ~+40%
+  PainChance 7
+  Speed 16                   // slight pursuit pressure
+  Obituary "%o was engulfed in flames by an Immolating Archvile (IV)."
+}
+
+// ---- T5: elite ---------------------------------------------------------------
+actor ARC_T5 : Archvile
+{
+  Tag "Cataclysmic Archvile (V)"
+  Translation "TINT_TIER5"
+  Health 1040                // ~+49%
+  PainChance 6
+  Speed 16
+  Obituary "%o was vaporized by a Cataclysmic Archvile (V)."
+}
+
+
+// ============================== SPIDER MASTERMIND (v1.0.1) ==============================
+// v1.0.1: Correct firing frames to vanilla (SPID A wind-up, then G/H loops).
+//         Extend bursts by adding GH pairs before A_SpidRefire; keep BRIGHT flags.
+//         Keep behavior hitscan-only; no strafing, no 0-tic loops, no label tricks.
+
+// T2: 2x GH pairs (~12 bullets) per refire check
+actor SMM_T2 : SpiderMastermind
+{
+  Tag "Suppressing Spider Mastermind (II)"
+  Translation "TINT_TIER2"
+  Health 3300
+  PainChance 160
+  Speed 8
+  Obituary "%o was sawed down by a Suppressing Spider Mastermind (II)."
+  States
+  {
+  Missile:
+    SPID A 20 BRIGHT A_FaceTarget
+    SPID G 4  BRIGHT A_SPosAttackUseAtkSound
+    SPID H 4  BRIGHT A_SPosAttackUseAtkSound
+    SPID G 4  BRIGHT A_SPosAttackUseAtkSound
+    SPID H 4  BRIGHT A_SPosAttackUseAtkSound
+    SPID H 1  BRIGHT A_SpidRefire
+    Goto Missile+1
+  }
+}
+
+// T3: 3x GH pairs (~18 bullets) per refire check; slightly snappier wind-up
+actor SMM_T3 : SpiderMastermind
+{
+  Tag "Dominating Spider Mastermind (III)"
+  Translation "TINT_TIER3"
+  Health 3600
+  PainChance 140
+  Speed 8
+  Obituary "%o was torn to chunks by a Dominating Spider Mastermind (III)."
+  States
+  {
+  Missile:
+    SPID A 18 BRIGHT A_FaceTarget
+    SPID G 4  BRIGHT A_SPosAttackUseAtkSound
+    SPID H 4  BRIGHT A_SPosAttackUseAtkSound
+    SPID G 4  BRIGHT A_SPosAttackUseAtkSound
+    SPID H 4  BRIGHT A_SPosAttackUseAtkSound
+    SPID G 4  BRIGHT A_SPosAttackUseAtkSound
+    SPID H 4  BRIGHT A_SPosAttackUseAtkSound
+    SPID H 1  BRIGHT A_SpidRefire
+    Goto Missile+1
+  }
+}
+
+// T4: 4x GH pairs (~24 bullets) per refire check; faster wind-up
+actor SMM_T4 : SpiderMastermind
+{
+  Tag "Overclocked Spider Mastermind (IV)"
+  Translation "TINT_TIER4"
+  Health 3900
+  PainChance 120
+  Speed 9
+  Obituary "%o was ground into minced meat by an Overclocked Spider Mastermind (IV)."
+  States
+  {
+  Missile:
+    SPID A 16 BRIGHT A_FaceTarget
+    SPID G 4  BRIGHT A_SPosAttackUseAtkSound
+    SPID H 4  BRIGHT A_SPosAttackUseAtkSound
+    SPID G 4  BRIGHT A_SPosAttackUseAtkSound
+    SPID H 4  BRIGHT A_SPosAttackUseAtkSound
+    SPID G 4  BRIGHT A_SPosAttackUseAtkSound
+    SPID H 4  BRIGHT A_SPosAttackUseAtkSound
+    SPID G 4  BRIGHT A_SPosAttackUseAtkSound
+    SPID H 4  BRIGHT A_SPosAttackUseAtkSound
+    SPID H 1  BRIGHT A_SpidRefire
+    Goto Missile+1
+  }
+}
+
+// T5: 5x GH pairs (~30 bullets) per refire check; snappiest wind-up
+actor SMM_T5 : SpiderMastermind
+{
+  Tag "Eradicating Spider Mastermind (V)"
+  Translation "TINT_TIER5"
+  Health 4200
+  PainChance 100
+  Speed 9
+  Obituary "%o was erased from existence by an Eradicating Spider Mastermind (V)."
+  States
+  {
+  Missile:
+    SPID A 14 BRIGHT A_FaceTarget
+    SPID G 4  BRIGHT A_SPosAttackUseAtkSound
+    SPID H 4  BRIGHT A_SPosAttackUseAtkSound
+    SPID G 4  BRIGHT A_SPosAttackUseAtkSound
+    SPID H 4  BRIGHT A_SPosAttackUseAtkSound
+    SPID G 4  BRIGHT A_SPosAttackUseAtkSound
+    SPID H 4  BRIGHT A_SPosAttackUseAtkSound
+    SPID G 4  BRIGHT A_SPosAttackUseAtkSound
+    SPID H 4  BRIGHT A_SPosAttackUseAtkSound
+    SPID G 4  BRIGHT A_SPosAttackUseAtkSound
+    SPID H 4  BRIGHT A_SPosAttackUseAtkSound
+    SPID H 1  BRIGHT A_SpidRefire
+    Goto Missile+1
+  }
+}
+
+
+
+// ============================== CYBERDEMON (v1.0.6) ==============================
+// v1.0.6: Vanilla look, faster cadence by trimming ONLY E (telegraph).
+//         - Fire pattern per rocket: E (aim) → F 12 BRIGHT (A_CyberAttack) → back to E.
+//         - T2 stays near-vanilla; T3–T5 get shorter E between shots.
+//         - No jumps/spreads/0-tic frames. One state per line. No semicolons.
+
+// ---------- T2: Bombarding (3 rockets; near-vanilla) ----------
+actor CYB_T2 : Cyberdemon
+{
+  Tag "Bombarding Cyberdemon (II)"
+  Translation "TINT_TIER2"
+  Health 4400
+  PainChance 18
+  Speed 16
+  Obituary "%o was blown apart from a Bombarding Cyberdemon (II)."
+  States
+  {
+  Missile:
+    // 1
+    CYBR E 6  A_FaceTarget
+    CYBR F 12 BRIGHT A_CyberAttack
+    // 2
+    CYBR E 12 A_FaceTarget
+    CYBR F 12 BRIGHT A_CyberAttack
+    // 3
+    CYBR E 12 A_FaceTarget
+    CYBR F 12 BRIGHT A_CyberAttack
+    // Settle
+    CYBR E 8
+    Goto See
+  }
+}
+
+// ---------- T3: Razing (4 rockets; modestly faster: E 10 / F 12) ----------
+actor CYB_T3 : Cyberdemon
+{
+  Tag "Razing Cyberdemon (III)"
+  Translation "TINT_TIER3"
+  Health 4800
+  PainChance 16
+  Speed 16
+  Obituary "%o was gibbed by a Razing Cyberdemon (III)."
+  States
+  {
+  Missile:
+    CYBR E 6  A_FaceTarget
+    CYBR F 12 BRIGHT A_CyberAttack
+    CYBR E 10 A_FaceTarget
+    CYBR F 12 BRIGHT A_CyberAttack
+    CYBR E 10 A_FaceTarget
+    CYBR F 12 BRIGHT A_CyberAttack
+    CYBR E 10 A_FaceTarget
+    CYBR F 12 BRIGHT A_CyberAttack
+    CYBR E 8
+    Goto See
+  }
+}
+
+// ---------- T4: Devastating (5 rockets; faster: E 9 / F 12) ----------
+actor CYB_T4 : Cyberdemon
+{
+  Tag "Devastating Cyberdemon (IV)"
+  Translation "TINT_TIER4"
+  Health 5200
+  PainChance 14
+  Speed 17
+  Obituary "%o was blasted into chunks by a Devastating Cyberdemon (IV)."
+  States
+  {
+  Missile:
+    CYBR E 6  A_FaceTarget
+    CYBR F 12 BRIGHT A_CyberAttack
+    CYBR E 9  A_FaceTarget
+    CYBR F 12 BRIGHT A_CyberAttack
+    CYBR E 9  A_FaceTarget
+    CYBR F 12 BRIGHT A_CyberAttack
+    CYBR E 9  A_FaceTarget
+    CYBR F 12 BRIGHT A_CyberAttack
+    CYBR E 9  A_FaceTarget
+    CYBR F 12 BRIGHT A_CyberAttack
+    CYBR E 6
+    Goto See
+  }
+}
+
+// ---------- T5: Exterminating (6 rockets; fastest: E 8 / F 12) ----------
+actor CYB_T5 : Cyberdemon
+{
+  Tag "Exterminating Cyberdemon (V)"
+  Translation "TINT_TIER5"
+  Health 5600
+  PainChance 12
+  Speed 17
+  Obituary "%o was obliterated by an Exterminating Cyberdemon (V)."
+  States
+  {
+  Missile:
+    CYBR E 6  A_FaceTarget
+    CYBR F 12 BRIGHT A_CyberAttack
+    CYBR E 8  A_FaceTarget
+    CYBR F 12 BRIGHT A_CyberAttack
+    CYBR E 8  A_FaceTarget
+    CYBR F 12 BRIGHT A_CyberAttack
+    CYBR E 8  A_FaceTarget
+    CYBR F 12 BRIGHT A_CyberAttack
+    CYBR E 8  A_FaceTarget
+    CYBR F 12 BRIGHT A_CyberAttack
+    CYBR E 8  A_FaceTarget
+    CYBR F 12 BRIGHT A_CyberAttack
+    CYBR E 6
+    Goto See
+  }
+}
+
+
+
+// =================== RANDOM SPAWNERS (3-arg: class, 255, weight) ===================
+
+actor ZM_Spawner  : RandomSpawner replaces ZombieMan
+{
+  DropItem "ZM_Base",           255, 64
+  DropItem "ZM_T2",             255, 24
+  DropItem "ZM_T3",             255, 12
+  DropItem "ZM_T4",             255, 6
+  DropItem "ZM_T5",             255, 2
+}
+
+actor SG_Spawner  : RandomSpawner replaces ShotgunGuy
+{
+  DropItem "SG_Base",           255, 56
+  DropItem "SG_T2",             255, 24
+  DropItem "SG_T3",             255, 12
+  DropItem "SG_T4",             255, 6
+  DropItem "SG_T5",             255, 2
+}
+
+actor IMP_Spawner : RandomSpawner replaces DoomImp
+{
+  DropItem "IMP_Base",            255, 58
+  DropItem "IMP_T2",              255, 24
+  DropItem "IMP_T3",              255, 12
+  DropItem "IMP_T4",              255, 5
+  DropItem "IMP_T5",              255, 1
+}
+
+actor DEM_Spawner : RandomSpawner replaces Demon
+{
+  DropItem "DEM_Base",        255, 70
+  DropItem "DEM_T2",          255, 20
+  DropItem "DEM_T3",          255, 7
+  DropItem "DEM_T4",          255, 2
+  DropItem "DEM_T5",          255, 1
+}
+
+actor SPC_Spawner : RandomSpawner replaces Spectre
+{
+  DropItem "SPC_Base",             255, 70
+  DropItem "SPC_T2",               255, 20
+  DropItem "SPC_T3",               255, 7
+  DropItem "SPC_T4",               255, 2
+  DropItem "SPC_T5",               255, 1
+}
+
+actor CG_Spawner  : RandomSpawner replaces ChaingunGuy
+{
+  DropItem "CG_Base",          255, 60
+  DropItem "CG_T2",            255, 24
+  DropItem "CG_T3",            255, 10
+  DropItem "CG_T4",            255, 5
+  DropItem "CG_T5",            255, 1
+}
+
+actor CAC_Spawner : RandomSpawner replaces Cacodemon
+{
+  DropItem "CAC_Base",           255, 65
+  DropItem "CAC_T2",             255, 22
+  DropItem "CAC_T3",             255, 9
+  DropItem "CAC_T4",             255, 3
+  DropItem "CAC_T5",             255, 1
+}
+
+actor LSO_Spawner : RandomSpawner replaces LostSoul
+{
+  DropItem "LSO_Base",          255, 68
+  DropItem "LSO_T2",            255, 22
+  DropItem "LSO_T3",            255, 7
+  DropItem "LSO_T4",            255, 2
+  DropItem "LSO_T5",            255, 1
+}
+
+actor HK_Spawner  : RandomSpawner replaces HellKnight
+{
+  DropItem "HK_Base",            255, 68
+  DropItem "HK_T2",              255, 22
+  DropItem "HK_T3",              255, 7
+  DropItem "HK_T4",              255, 2
+  DropItem "HK_T5",              255, 1
+}
+
+actor BAR_Spawner : RandomSpawner replaces BaronOfHell
+{
+  DropItem "BAR_Base",            255, 72
+  DropItem "BAR_T2",              255, 18
+  DropItem "BAR_T3",              255, 6
+  DropItem "BAR_T4",              255, 3
+  DropItem "BAR_T5",              255, 1
+}
+
+actor REV_Spawner : RandomSpawner replaces Revenant
+{
+  DropItem "REV_Base",            255, 70
+  DropItem "REV_T2",              255, 20
+  DropItem "REV_T3",              255, 7
+  DropItem "REV_T4",              255, 2
+  DropItem "REV_T5",              255, 1
+}
+
+actor MAN_Spawner : RandomSpawner replaces Fatso
+{
+  DropItem "MAN_Base",             255, 70
+  DropItem "MAN_T2",               255, 20
+  DropItem "MAN_T3",               255, 7
+  DropItem "MAN_T4",               255, 2
+  DropItem "MAN_T5",               255, 1
+}
+
+actor ARA_Spawner : RandomSpawner replaces Arachnotron
+{
+  DropItem "ARA_Base",             255, 70
+  DropItem "ARA_T2",               255, 20
+  DropItem "ARA_T3",               255, 7
+  DropItem "ARA_T4",               255, 2
+  DropItem "ARA_T5",               255, 1
+}
+
+// Pain Elemental
+actor PEL_Spawner : RandomSpawner replaces PainElemental
+{
+  DropItem "PEL_Base",             255, 70
+  DropItem "PEL_T2",               255, 20
+  DropItem "PEL_T3",               255, 7
+  DropItem "PEL_T4",               255, 2
+  DropItem "PEL_T5",               255, 1
+}
+
+// Archvile
+actor ARC_Spawner : RandomSpawner replaces Archvile
+{
+  DropItem "ARC_Base",           255, 70
+  DropItem "ARC_T2",             255, 20
+  DropItem "ARC_T3",             255, 7
+  DropItem "ARC_T4",             255, 2
+  DropItem "ARC_T5",             255, 1
+}
+
+// Spider Mastermind
+actor SMM_Spawner : RandomSpawner replaces SpiderMastermind
+{
+  DropItem "SMM_Base",             255, 70
+  DropItem "SMM_T2",               255, 20
+  DropItem "SMM_T3",               255, 7
+  DropItem "SMM_T4",               255, 2
+  DropItem "SMM_T5",               255, 1
+}
+
+// Cyberdemon
+actor CYB_Spawner : RandomSpawner replaces Cyberdemon
+{
+  DropItem "CYB_Base",             255, 70
+  DropItem "CYB_T2",               255, 20
+  DropItem "CYB_T3",               255, 7
+  DropItem "CYB_T4",               255, 2
+  DropItem "CYB_T5",               255, 1
+}

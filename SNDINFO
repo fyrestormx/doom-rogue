@@ -1,0 +1,4 @@
+# Doom Rogue custom sound aliases for beta25
+# Define a low-pitched Romero head hurt sound for the MTYB boon.
+# Maps to the built-in dsbossit sound (Icon of Sin pain). See A_StartSound docs.
+romero_hurt  dsbossit

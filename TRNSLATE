@@ -1,0 +1,7 @@
+// Monster Roguelike — Tier Tints (fixed)
+// Define custom named translations using the canonical TRNSLATE syntax.
+// Each translation name is followed by an equals sign and a translation string.
+TINT_TIER2 = "0:255=@18[56,176,192]"
+TINT_TIER3 = "0:255=@18[104,152,168]"
+TINT_TIER4 = "0:255=@18[168,120,168]"
+TINT_TIER5 = "0:255=@18[196,96,144]"

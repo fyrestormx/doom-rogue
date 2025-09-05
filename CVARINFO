@@ -1,0 +1,8 @@
+// Custom console variables for Doom Rogue mod.  These CVARs allow testers to
+// toggle debugging output and adjust logging verbosity without modifying the
+// code.  They are defined as user CVARs so each player may change them at
+// runtime via the console.  See the ZDoom Wiki for CVARINFO syntax【246581989945189†L10-L29】.
+
+user int dr_dbg = 0;       // Master debug switch: 0 = no debug, >0 = debug on
+user int dr_dbg_hits = 0;   // Hit/kill debug level: 0 = off, 1 = hits+kills, 2 = verbose
+user float dr_log_rate = 50.0; // Log throttle: messages per second when using DLog()
